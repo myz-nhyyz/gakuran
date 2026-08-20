@@ -1,4 +1,4 @@
--- Auto SCHOOL NEWSPAPER Farmer v22 — Auto phone-state detect + reopen
+-- Auto SCHOOL NEWSPAPER Farmer v24 — FPS Optimized
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -13,9 +13,8 @@ local running = false
 local jobAccepted = false
 local cameraOpened = false
 local phoneOpen = false
-local facingConnection = nil
-local drawConnection = nil
-local currentFaceTarget = nil
+local trackConnection = nil
+local currentTrackTarget = nil
 
 local lastHealth = Humanoid.Health
 local combatCooldownUntil = 0
@@ -35,93 +34,117 @@ local function logStatus(msg)
 end
 
 -- ============================================
--- REAL PHONE STATE DETECTION
+-- UNIFIED GUI SCAN — 1 pass duy nhất cho assignment + phone, throttle 0.2s
 -- ============================================
-local phoneFrameCache = nil
+local guiCache = {
+    assignmentName = nil,
+    phoneFrame = nil,
+    phoneOpen = false,
+    lastScan = 0
+}
+local GUI_SCAN_THROTTLE = 0.2
 
-local function findPhoneFrame()
-    if phoneFrameCache and phoneFrameCache.Parent then
-        return phoneFrameCache
-    end
-    phoneFrameCache = nil
+local function scanGui(force)
+    if not force and tick() - guiCache.lastScan < GUI_SCAN_THROTTLE then return end
+    guiCache.lastScan = tick()
+
+    local assignmentName = nil
+    local phoneFrame = guiCache.phoneFrame
+    local phoneValid = phoneFrame and phoneFrame.Parent
 
     for _, obj in pairs(Player.PlayerGui:GetDescendants()) do
-        if obj:IsA("Frame") or obj:IsA("ScreenGui") or obj:IsA("ImageLabel") then
-            local markerHits = 0
-            for _, child in ipairs(obj:GetDescendants()) do
-                if (child:IsA("TextButton") or child:IsA("TextLabel")) and child.Text then
-                    local t = child.Text:upper()
+        if not assignmentName and obj:IsA("TextLabel") and obj.Text and obj.Text ~= "" then
+            local name = obj.Text:match("[Gg]et a photo of%s+([^%.\n]+)")
+            if name then assignmentName = name:gsub("%s+$",""):gsub("^%s+","") end
+        end
+
+        -- chỉ quét tìm phoneFrame khi cache cũ đã mất (không quét lồng mỗi vòng)
+        if not phoneValid and (obj:IsA("Frame") or obj:IsA("ScreenGui") or obj:IsA("ImageLabel")) then
+            local hits = 0
+            for _, c in ipairs(obj:GetChildren()) do
+                if (c:IsA("TextButton") or c:IsA("TextLabel")) and c.Text then
+                    local t = c.Text:upper()
                     if t == "INDEED" or t == "CONTACTS" or t == "MENU"
                        or t == "CAMERA" or t == "DIAL" or t == "MY PHONE" then
-                        markerHits = markerHits + 1
+                        hits = hits + 1
                     end
                 end
             end
-            if markerHits >= 2 then
-                phoneFrameCache = obj
-                return obj
-            end
+            if hits >= 2 then phoneFrame = obj; phoneValid = true end
         end
     end
-    return nil
+
+    guiCache.assignmentName = assignmentName
+    guiCache.phoneFrame = phoneFrame
+    if phoneFrame and phoneFrame.Parent then
+        guiCache.phoneOpen = phoneFrame:IsA("ScreenGui") and phoneFrame.Enabled or phoneFrame.Visible
+    else
+        guiCache.phoneOpen = false
+    end
+end
+
+local function getAssignmentTargetName()
+    scanGui()
+    return guiCache.assignmentName
+end
+
+local function isJobActive()
+    return getAssignmentTargetName() ~= nil
 end
 
 local function isPhoneOpenReal()
-    local frame = findPhoneFrame()
-    if not frame then
-        return false
-    end
-    if frame:IsA("ScreenGui") then
-        return frame.Enabled
-    else
-        return frame.Visible
-    end
+    scanGui()
+    return guiCache.phoneOpen
 end
 
-local function pressLeftAlt()
-    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftAlt, false, nil)
-    task.wait(0.12)
-    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftAlt, false, nil)
+local function pressKeyRaw(code, downDelay, afterDelay)
+    downDelay = downDelay or 0.12
+    afterDelay = afterDelay or 0.3
+    VirtualInputManager:SendKeyEvent(true, code, false, nil)
+    task.wait(downDelay)
+    VirtualInputManager:SendKeyEvent(false, code, false, nil)
+    task.wait(afterDelay)
 end
 
-local function ensurePhoneState(wantOpen, waitAfter)
-    waitAfter = waitAfter or 0.4
-    phoneFrameCache = nil
-    local actual = isPhoneOpenReal()
-    if actual ~= wantOpen then
-        pressLeftAlt()
-        task.wait(waitAfter)
-        phoneFrameCache = nil
-        logStatus("Phone toggle: " .. tostring(actual) .. " -> " .. tostring(wantOpen))
-    end
-    phoneOpen = wantOpen
-end
-
--- Mở điện thoại và VERIFY thật sự đã mở (retry tối đa 3 lần)
--- Dùng trước mọi thao tác UI trên phone
-local function ensurePhoneOpenVerified()
+-- ============================================
+-- PHONE OPEN — M để mở, LeftAlt x2 để reset về home nếu đang mở dở
+-- ============================================
+local function openPhoneToHomeState()
     for attempt = 1, 3 do
         if not running then return false end
-        phoneFrameCache = nil
-        if isPhoneOpenReal() then
+        local isOpen = isPhoneOpenReal()
+
+        if not isOpen then
+            logStatus("Phone CLOSED -> bấm M mở (lần " .. attempt .. "/3)...")
+            pressKeyRaw(Enum.KeyCode.M, 0.12, 0.5)
+        else
+            logStatus("Phone đang OPEN (trạng thái không rõ) -> reset LeftAlt x2 (lần " .. attempt .. "/3)...")
+            pressKeyRaw(Enum.KeyCode.LeftAlt, 0.12, 0.35)
+            if not running then return false end
+            pressKeyRaw(Enum.KeyCode.LeftAlt, 0.12, 0.5)
+        end
+
+        if not running then return false end
+        scanGui(true)
+        if guiCache.phoneOpen then
             phoneOpen = true
-            if attempt > 1 then
-                logStatus("✓ Điện thoại đã MỞ (lần thử " .. attempt .. ")")
-            end
+            logStatus("✓ Điện thoại ở trạng thái HOME, sẵn sàng navigate.")
             return true
         end
-        logStatus("Phone CLOSED — bấm LeftAlt mở lại (lần " .. attempt .. "/3)...")
-        pressLeftAlt()
-        if not waitCheck(0.55) then return false end
-        phoneFrameCache = nil
     end
 
-    phoneOpen = isPhoneOpenReal()
-    if not phoneOpen then
-        logStatus("⚠ Không mở được điện thoại sau 3 lần. Bỏ vòng này.")
-        return false
+    phoneOpen = false
+    logStatus("⚠ Không đưa điện thoại về trạng thái home được sau 3 lần.")
+    return false
+end
+
+local function ensurePhoneClosed()
+    scanGui(true)
+    if guiCache.phoneOpen then
+        pressKeyRaw(Enum.KeyCode.LeftAlt, 0.12, 0.15)
+        scanGui(true)
     end
-    return true
+    phoneOpen = false
 end
 
 -- ============================================
@@ -153,27 +176,10 @@ local function waitCheck(t)
 end
 
 -- ============================================
--- Assignment detect (nguồn xác thực job DUY NHẤT)
--- ============================================
-local function getAssignmentTargetName()
-    for _, obj in pairs(Player.PlayerGui:GetDescendants()) do
-        if obj:IsA("TextLabel") and obj.Text and obj.Text ~= "" then
-            local name = obj.Text:match("[Gg]et a photo of%s+([^%.\n]+)")
-            if name then return name:gsub("%s+$",""):gsub("^%s+","") end
-        end
-    end
-    return nil
-end
-
-local function isJobActive()
-    return getAssignmentTargetName() ~= nil
-end
-
--- ============================================
 -- Combat Safety
 -- ============================================
 local function forceClosePhone()
-    ensurePhoneState(false, 0.15)
+    ensurePhoneClosed()
     cameraOpened = false
     logStatus("⚠ Bị tấn công! Đóng điện thoại khẩn cấp.")
     underAttack = true
@@ -184,7 +190,9 @@ local function forceClosePhone()
 end
 
 Humanoid.HealthChanged:Connect(function(newHealth)
-    if newHealth < lastHealth - 0.5 then forceClosePhone() end
+    if running and not underAttack and newHealth < lastHealth - 0.5 then
+        forceClosePhone()
+    end
     lastHealth = newHealth
 end)
 
@@ -194,7 +202,9 @@ Player.CharacterAdded:Connect(function(newChar)
     Humanoid = newChar:WaitForChild("Humanoid")
     lastHealth = Humanoid.Health
     Humanoid.HealthChanged:Connect(function(h)
-        if h < lastHealth - 0.5 then forceClosePhone() end
+        if running and not underAttack and h < lastHealth - 0.5 then
+            forceClosePhone()
+        end
         lastHealth = h
     end)
 end)
@@ -208,7 +218,7 @@ local function initReticle()
     pcall(function()
         reticleCircle = Drawing.new("Circle")
         reticleCircle.Filled = false; reticleCircle.Color = Color3.fromRGB(255,40,40)
-        reticleCircle.Thickness = 3; reticleCircle.NumSides = 50; reticleCircle.Visible = false
+        reticleCircle.Thickness = 3; reticleCircle.NumSides = 40; reticleCircle.Visible = false
         reticleLine = Drawing.new("Line")
         reticleLine.Color = Color3.fromRGB(255,220,40); reticleLine.Thickness = 2; reticleLine.Visible = false
         reticleDot = Drawing.new("Circle")
@@ -216,58 +226,32 @@ local function initReticle()
     end)
 end
 
-local function updateReticleVisual(target)
-    if not reticleCircle then return end
-    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
-    local center = Vector2.new(vw / 2, vh / 2)
-    reticleCircle.Radius = FRAME_RADIUS_RATIO * vw
-    reticleCircle.Position = center
-    reticleCircle.Visible = true
-
-    if target and target.part and target.part.Parent then
-        local sp, onScreen = Camera:WorldToViewportPoint(target.part.Position)
-        if onScreen then
-            reticleLine.From = center
-            reticleLine.To = Vector2.new(sp.X, sp.Y)
-            reticleLine.Visible = true
-            reticleDot.Position = Vector2.new(sp.X, sp.Y)
-            reticleDot.Visible = true
-            local dx, dy = (sp.X-center.X)/vw, (sp.Y-center.Y)/vh
-            local locked = math.sqrt(dx*dx+dy*dy) <= FRAME_RADIUS_RATIO
-            local c = locked and Color3.fromRGB(60,255,90) or Color3.fromRGB(255,40,40)
-            reticleCircle.Color = c
-            reticleLine.Color = locked and Color3.fromRGB(60,255,90) or Color3.fromRGB(255,220,40)
-            reticleDot.Color = reticleLine.Color
-        else
-            reticleLine.Visible = false
-            reticleDot.Visible = false
-            reticleCircle.Color = Color3.fromRGB(255,40,40)
-        end
-    else
-        reticleLine.Visible = false
-        reticleDot.Visible = false
-    end
-end
-
-local function startVisual(target)
-    if drawConnection then drawConnection:Disconnect() end
-    drawConnection = RunService.RenderStepped:Connect(function()
-        if not running then return end
-        updateReticleVisual(target)
-    end)
-end
-
-local function stopVisual()
-    if drawConnection then drawConnection:Disconnect(); drawConnection = nil end
+local function stopVisualOnly()
     if reticleCircle then reticleCircle.Visible = false end
     if reticleLine then reticleLine.Visible = false end
     if reticleDot then reticleDot.Visible = false end
 end
 
 -- ============================================
--- ESP
+-- ESP — CÓ CACHE, throttle 0.3s để tránh quét workspace liên tục
 -- ============================================
+local espCache = { result = nil, lastScan = 0 }
+local ESP_SCAN_THROTTLE = 0.3
+
 local function findQuestMarker()
+    if espCache.result and tick() - espCache.lastScan < ESP_SCAN_THROTTLE then
+        local r = espCache.result
+        if r.part and r.part.Parent then
+            local rp = Character:FindFirstChild("HumanoidRootPart")
+            if rp then
+                r.pos = r.part.Position
+                r.dist = (rp.Position - r.part.Position).Magnitude
+            end
+            return r
+        end
+    end
+
+    espCache.lastScan = tick()
     local rootPart = Character:FindFirstChild("HumanoidRootPart")
     if not rootPart then return nil end
 
@@ -278,7 +262,7 @@ local function findQuestMarker()
             if obj:IsA("BillboardGui") then
                 local hasDist = false
                 local nm = nil
-                for _, child in ipairs(obj:GetDescendants()) do
+                for _, child in ipairs(obj:GetChildren()) do
                     if child:IsA("TextLabel") and child.Text and child.Text ~= "" then
                         local t = child.Text:lower()
                         if t:find("studs away") or t:find("m away") or t:match("%d+%s*away") then
@@ -305,47 +289,65 @@ local function findQuestMarker()
             end
         end
     end
-    if #candidates == 0 then return nil end
 
-    local an = (getAssignmentTargetName() or ""):lower()
+    if #candidates == 0 then espCache.result = nil; return nil end
+
+    local result
+    local an = (guiCache.assignmentName or ""):lower()
     if #an > 0 then
         for _, c in ipairs(candidates) do
             local cn = (c.name or ""):lower()
             if cn == an or cn:find(an,1,true) or an:find(cn,1,true) then
                 if c.part and c.part.Parent then
-                    return {pos=c.part.Position, part=c.part, name=c.name, dist=(rootPart.Position-c.part.Position).Magnitude}
+                    result = {pos=c.part.Position, part=c.part, name=c.name, dist=(rootPart.Position-c.part.Position).Magnitude}
+                    break
                 end
             end
         end
     end
 
-    local best, bd = nil, math.huge
-    for _, c in ipairs(candidates) do
-        if c.part and c.part.Parent then
-            local d = (rootPart.Position-c.part.Position).Magnitude
-            if d < bd then bd=d; best={pos=c.part.Position, part=c.part, name=c.name, dist=d} end
+    if not result then
+        local bd = math.huge
+        for _, c in ipairs(candidates) do
+            if c.part and c.part.Parent then
+                local d = (rootPart.Position-c.part.Position).Magnitude
+                if d < bd then bd=d; result={pos=c.part.Position, part=c.part, name=c.name, dist=d} end
+            end
         end
     end
-    return best
+
+    espCache.result = result
+    return result
 end
 
 -- ============================================
--- Facing / Camera Bypass — force CFrame trực tiếp, không cần Q
+-- TRACKING — gộp facing + camera bypass + reticle vào 1 RenderStepped
+-- (trước đây là 2 connection riêng, giờ chỉ 1, giảm nửa overhead/frame)
 -- ============================================
 local MAX_LOCK_DIST_MULT = 1.5
 
-local function stopFacing()
-    if facingConnection then facingConnection:Disconnect(); facingConnection = nil end
-    currentFaceTarget = nil
+local function stopTracking()
+    if trackConnection then trackConnection:Disconnect(); trackConnection = nil end
+    currentTrackTarget = nil
+    stopVisualOnly()
 end
 
-local function startFacing(target)
-    stopFacing()
-    currentFaceTarget = target
-    facingConnection = RunService.RenderStepped:Connect(function()
+local function startTracking(target)
+    stopTracking()
+    currentTrackTarget = target
+
+    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    local center = Vector2.new(vw / 2, vh / 2)
+    if reticleCircle then
+        reticleCircle.Radius = FRAME_RADIUS_RATIO * vw
+        reticleCircle.Position = center
+        reticleCircle.Visible = true
+    end
+
+    trackConnection = RunService.RenderStepped:Connect(function()
         if not running or underAttack then return end
-        if not currentFaceTarget or not currentFaceTarget.part or not currentFaceTarget.part.Parent then
-            stopFacing()
+        if not currentTrackTarget or not currentTrackTarget.part or not currentTrackTarget.part.Parent then
+            stopTracking()
             return
         end
 
@@ -354,19 +356,48 @@ local function startFacing(target)
         local root = char:FindFirstChild("HumanoidRootPart")
         if not root then return end
 
-        local targetPos = currentFaceTarget.part.Position
+        local targetPos = currentTrackTarget.part.Position
 
         local dist = (targetPos - root.Position).Magnitude
         if dist > 60 * MAX_LOCK_DIST_MULT then
-            stopFacing()
+            stopTracking()
             return
         end
 
+        -- aim: xoay thẳng về target, bypass hoàn toàn — không nội suy
         local lookAt = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
         root.CFrame = CFrame.new(root.Position, lookAt)
 
+        -- camera bypass
         local focusPos = (targetPos + root.Position) / 2 + Vector3.new(0, 2, 0)
         Camera.CFrame = CFrame.new(Camera.CFrame.Position, focusPos)
+
+        -- reticle — tái sử dụng cùng 1 lần WorldToViewportPoint, không tính lại
+        if reticleCircle then
+            local vw2, vh2 = Camera.ViewportSize.X, Camera.ViewportSize.Y
+            local cen2 = Vector2.new(vw2/2, vh2/2)
+            reticleCircle.Radius = FRAME_RADIUS_RATIO * vw2
+            reticleCircle.Position = cen2
+
+            local sp, onScreen = Camera:WorldToViewportPoint(targetPos)
+            if onScreen then
+                reticleLine.From = cen2
+                reticleLine.To = Vector2.new(sp.X, sp.Y)
+                reticleLine.Visible = true
+                reticleDot.Position = Vector2.new(sp.X, sp.Y)
+                reticleDot.Visible = true
+                local dx, dy = (sp.X-cen2.X)/vw2, (sp.Y-cen2.Y)/vh2
+                local locked = math.sqrt(dx*dx+dy*dy) <= FRAME_RADIUS_RATIO
+                local c = locked and Color3.fromRGB(60,255,90) or Color3.fromRGB(255,40,40)
+                reticleCircle.Color = c
+                reticleLine.Color = locked and Color3.fromRGB(60,255,90) or Color3.fromRGB(255,220,40)
+                reticleDot.Color = reticleLine.Color
+            else
+                reticleLine.Visible = false
+                reticleDot.Visible = false
+                reticleCircle.Color = Color3.fromRGB(255,40,40)
+            end
+        end
     end)
 end
 
@@ -391,7 +422,7 @@ local function waitForLock(target, ms)
 end
 
 -- ============================================
--- TELEPORT — có xác nhận vị trí thật (fix máy khựng/lag)
+-- TELEPORT — có xác nhận vị trí thật
 -- ============================================
 local function teleportNearTarget(target, standDistance)
     standDistance = standDistance or 5
@@ -439,7 +470,7 @@ local function teleportNearTarget(target, standDistance)
 end
 
 -- ============================================
--- Chấp nhận job — LeftAlt(nếu cần) -> Enter -> →↓↓↓ -> Enter -> đợi 0.5s -> Enter -> đợi 0.2s -> Enter
+-- Chấp nhận job
 -- ============================================
 local function acceptJob()
     if not running then return end
@@ -450,8 +481,8 @@ local function acceptJob()
         return
     end
 
-    logStatus("Kiểm tra trạng thái điện thoại thật...")
-    if not ensurePhoneOpenVerified() then return end
+    logStatus("Đưa điện thoại về trạng thái home...")
+    if not openPhoneToHomeState() then return end
     if not running then return end
 
     logStatus("Bước: Enter vào menu...")
@@ -512,7 +543,6 @@ end
 
 -- ============================================
 -- Chu kỳ chính
--- teleport -> xác nhận -> đợi 2s -> ENSURE PHONE OPEN -> Backspace x2 -> ↓↓↓ -> Enter -> Enter -> đợi 1s -> Backspace
 -- ============================================
 local function doTargetCycle()
     if not running or underAttack then return false end
@@ -520,28 +550,18 @@ local function doTargetCycle()
     local target = findQuestMarker()
     if not target then return false end
 
-    startVisual(target)
-    startFacing(target)
+    startTracking(target)
 
     local tpOk = teleportNearTarget(target, 5)
-    if not tpOk or not running then stopFacing(); stopVisual(); return false end
+    if not tpOk or not running then stopTracking(); return false end
 
-    -- đợi 2s sau khi xác nhận dịch chuyển thành công
-    if not waitCheck(2.0) then stopFacing(); stopVisual(); return false end
+    if not waitCheck(2.0) then stopTracking(); return false end
 
-    -- ★ AUTO-DETECT: nếu phone đang đóng thì mở lại trước khi bấm UI
-    if not ensurePhoneOpenVerified() then
-        stopFacing(); stopVisual()
+    if not openPhoneToHomeState() then
+        stopTracking()
         return false
     end
 
-    -- Backspace x2
-    key(Enum.KeyCode.Backspace, 0.3)
-    if not running then return false end
-    key(Enum.KeyCode.Backspace, 0.3)
-    if not running then return false end
-
-    -- ↓↓↓
     key(Enum.KeyCode.Down, 0.3)
     if not running then return false end
     key(Enum.KeyCode.Down, 0.3)
@@ -549,7 +569,6 @@ local function doTargetCycle()
     key(Enum.KeyCode.Down, 0.3)
     if not running then return false end
 
-    -- Enter mở camera
     key(Enum.KeyCode.Return, 0.5)
     if not running then return false end
     cameraOpened = true
@@ -557,27 +576,23 @@ local function doTargetCycle()
     waitForLock(target, 0.3)
     if not running or underAttack then return false end
 
-    -- Enter chụp
     logStatus("📸 Chụp: " .. target.name .. " (" .. string.format("%.1f", target.dist) .. " studs)")
     key(Enum.KeyCode.Return, 0.3)
     if not running then return false end
 
-    -- đợi chụp xong 1s
     if not waitCheck(1.0) then return false end
 
-    -- Backspace thoát camera
     key(Enum.KeyCode.Backspace, 0.3)
     if not running then return false end
 
-    stopFacing()
-    stopVisual()
+    stopTracking()
     cameraOpened = false
 
     return true
 end
 
 -- ============================================
--- MAIN LOOP — crash-safe
+-- MAIN LOOP
 -- ============================================
 local function mainLoop()
     initReticle()
@@ -617,8 +632,7 @@ local function mainLoop()
         end
     end
 
-    stopVisual()
-    stopFacing()
+    stopTracking()
     cameraOpened = false
     logStatus("Đã dừng.")
 end
@@ -710,9 +724,8 @@ local function buildUI()
         else
             btn.Text = "START"
             btn.BackgroundColor3 = Color3.fromRGB(50,170,70)
-            stopVisual()
-            stopFacing()
-            ensurePhoneState(false, 0.15)
+            stopTracking()
+            ensurePhoneClosed()
             cameraOpened = false
         end
     end)
@@ -724,19 +737,18 @@ local function buildUI()
         end
     end)
 
+    -- status poll: KHÔNG force-invalidate cache nữa, chỉ đọc giá trị đã cache sẵn
     task.spawn(function()
         while true do
-            task.wait(0.3)
-            phoneFrameCache = nil
-            local realPhoneState = isPhoneOpenReal()
-            phoneOpen = realPhoneState
+            task.wait(0.5)
+            scanGui()
 
             if statusLabels.phone then
-                statusLabels.phone.Text = "Phone: " .. (realPhoneState and "OPEN" or "CLOSED")
-                statusLabels.phone.TextColor3 = realPhoneState and Color3.fromRGB(80,220,120) or Color3.fromRGB(200,200,200)
+                statusLabels.phone.Text = "Phone: " .. (guiCache.phoneOpen and "OPEN" or "CLOSED")
+                statusLabels.phone.TextColor3 = guiCache.phoneOpen and Color3.fromRGB(80,220,120) or Color3.fromRGB(200,200,200)
             end
             if statusLabels.job then
-                local active = isJobActive()
+                local active = guiCache.assignmentName ~= nil
                 statusLabels.job.Text = "Job: " .. (active and "ACCEPTED" or "NOT ACCEPTED")
                 statusLabels.job.TextColor3 = active and Color3.fromRGB(80,220,120) or Color3.fromRGB(255,150,80)
             end
@@ -749,12 +761,11 @@ local function buildUI()
                 statusLabels.camera.TextColor3 = cameraOpened and Color3.fromRGB(80,220,120) or Color3.fromRGB(200,200,200)
             end
             if statusLabels.target then
-                local n = getAssignmentTargetName()
-                statusLabels.target.Text = "Target: " .. (n or "--")
+                statusLabels.target.Text = "Target: " .. (guiCache.assignmentName or "--")
             end
         end
     end)
 end
 
 buildUI()
-logStatus("Script loaded v22 — Auto phone-state detect, reopen if CLOSED.")
+logStatus("Script loaded v24 — FPS optimized (cached scans, merged RenderStepped).")
