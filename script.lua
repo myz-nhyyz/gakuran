@@ -719,7 +719,7 @@ local function buildUI()
 
     UserInputService.InputBegan:Connect(function(i, gp)
         if gp then return end
-        if i.KeyCode == Enum.KeyCode.M then
+        if i.KeyCode == Enum.KeyCode.K then
             frame.Visible = not frame.Visible
         end
     end)
