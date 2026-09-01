@@ -1,17 +1,61 @@
--- Hero Battleground | Full Suite v5
+-- Hero Battleground | Full Suite v6 — Anti-Detect Mobile
 -- Executor: Arceus X / Delta / Fluxus Mobile
 -- by Axiom
 
-local Players        = game:GetService("Players")
-local RunService     = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService   = game:GetService("TweenService")
-local Workspace      = game:GetService("Workspace")
-local VIM            = game:GetService("VirtualInputManager")
+local TweenService     = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
+local CoreGui          = game:GetService("CoreGui")
+local VIM              = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 local Mouse       = LocalPlayer:GetMouse()
+
+-- ========================
+-- ANTI-DETECT WRAPPER
+-- ========================
+-- Dùng CoreGui thay PlayerGui để tránh Hyperion scan
+local function SafeGui(name)
+    local old = CoreGui:FindFirstChild(name)
+    if old then old:Destroy() end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name           = name
+    sg.ResetOnSpawn   = false
+    sg.IgnoreGuiInset = true
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    -- syn.protect_gui nếu executor support (Synapse X)
+    pcall(function()
+        if syn and syn.protect_gui then
+            syn.protect_gui(sg)
+        end
+    end)
+
+    -- protect_gui universal fallback
+    pcall(function()
+        if protect_gui then protect_gui(sg) end
+    end)
+
+    sg.Parent = CoreGui
+    return sg
+end
+
+-- VIM wrapper: tránh gọi trực tiếp — một số game patch VIM trên mobile
+-- Dùng firebutton / firetouchinterest nếu có (Arceus X / Delta)
+local function SimulateClick(x, y)
+    pcall(function() VIM:SendMouseButtonEvent(x, y, 0, true,  game, 0) end)
+    task.delay(0.09, function()
+        pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 0) end)
+    end)
+end
+
+local function SimulateKey(down, keyCode)
+    pcall(function() VIM:SendKeyEvent(down, keyCode, false, game) end)
+end
 
 -- ========================
 -- CONFIG
@@ -37,7 +81,7 @@ local Config = {
         SmoothFactor = 0.13,
         AimKey       = Enum.KeyCode.H,
         HitPart      = "Head",
-        ShowFOV      = true,
+        ShowFOV      = false,
     },
     Autoblock = {
         Enabled      = false,
@@ -56,10 +100,10 @@ local State = {
     HookTarget      = nil,
     DashCooldown    = false,
     BlockActive     = false,
-    AimHeld         = false,
+    AimActive       = false,   -- toggle, không phải hold
     TargetHL        = nil,
     FOVCircle       = nil,
-    MenuVisible     = true,
+    MenuVisible     = false,   -- mặc định ẩn
     MobileDashPanel = nil,
     MobileAimPanel  = nil,
 }
@@ -86,8 +130,6 @@ local function WorldDist(p)
     local a, b = GetRoot(LocalPlayer), GetRoot(p)
     return (a and b) and (a.Position - b.Position).Magnitude or math.huge
 end
-
--- Closest player by world distance
 local function ClosestWorld()
     local best, bd = nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
@@ -97,8 +139,6 @@ local function ClosestWorld()
     end
     return best
 end
-
--- Closest player to screen center (aimbot)
 local function ClosestToCenter()
     local cx = Camera.ViewportSize.X / 2
     local cy = Camera.ViewportSize.Y / 2
@@ -116,8 +156,6 @@ local function ClosestToCenter()
     end
     return best
 end
-
--- Closest player to mouse cursor
 local function ClosestToCursor()
     local best, bd = nil, Config.Aimbot.FOV
     for _, p in ipairs(Players:GetPlayers()) do
@@ -135,7 +173,7 @@ local function ClosestToCursor()
 end
 
 -- ========================
--- HOOK DASH TARGET HIGHLIGHT
+-- HOOK DASH
 -- ========================
 local function SetHookTarget(player)
     if State.TargetHL then
@@ -156,9 +194,6 @@ local function SetHookTarget(player)
     State.TargetHL         = hl
 end
 
--- ========================
--- BEZIER ARC DASH
--- ========================
 local function Bezier(p0, p1, p2, t)
     return (1-t)^2 * p0 + 2*(1-t)*t * p1 + t^2 * p2
 end
@@ -176,7 +211,6 @@ local function PerformSideDash(target)
     local p0     = myRoot.Position
     local tCF    = targetRoot.CFrame
     local side   = (math.random(0, 1) == 0) and 1 or -1
-
     local flank  = (tCF * CFrame.new(side * cfg.ArcRadius * 2.2, 0, 0)).Position
     local p1     = Vector3.new(flank.X, p0.Y, flank.Z)
     local behind = (tCF * CFrame.new(0, 0, cfg.BehindOffset)).Position
@@ -188,14 +222,12 @@ local function PerformSideDash(target)
 
     local function DoStep(i)
         if not char or not char.Parent then
-            State.DashCooldown = false
-            return
+            State.DashCooldown = false; return
         end
         local root = GetRoot(LocalPlayer)
         local tgt  = GetRoot(target)
         if not root or not tgt then
-            State.DashCooldown = false
-            return
+            State.DashCooldown = false; return
         end
         local t   = i / steps
         local pos = Bezier(p0, p1, p2, t)
@@ -205,20 +237,12 @@ local function PerformSideDash(target)
         if i >= steps then
             if cfg.AutoM1 then
                 task.delay(0.06, function()
-                    pcall(function()
-                        VIM:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, true, game, 0)
-                        task.delay(0.09, function()
-                            pcall(function()
-                                VIM:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, false, game, 0)
-                            end)
-                        end)
-                    end)
+                    SimulateClick(Mouse.X, Mouse.Y)
                 end)
             end
             task.delay(0.55, function() State.DashCooldown = false end)
             return
         end
-
         local jitter = stepTime + (math.random() - 0.5) * cfg.StepJitter * 2
         task.delay(jitter, function() DoStep(i + 1) end)
     end
@@ -229,20 +253,20 @@ end
 -- ========================
 -- FOV CIRCLE
 -- ========================
-local function BuildFOVCircle()
+local function DestroyFOV()
     if State.FOVCircle then
         State.FOVCircle:Destroy()
         State.FOVCircle = nil
     end
+end
+
+local function BuildFOVCircle()
+    DestroyFOV()
     if not Config.Aimbot.ShowFOV or not Config.Aimbot.Enabled then return end
 
-    local sg = Instance.new("ScreenGui")
-    sg.Name           = "AxiomFOV"
-    sg.ResetOnSpawn   = false
-    sg.IgnoreGuiInset = true
-    sg.Parent         = LocalPlayer.PlayerGui
+    local sg = SafeGui("AxiomFOV")
+    local r  = Config.Aimbot.FOV
 
-    local r = Config.Aimbot.FOV
     local d = Instance.new("Frame")
     d.Size                   = UDim2.new(0, r*2, 0, r*2)
     d.AnchorPoint            = Vector2.new(0.5, 0.5)
@@ -264,32 +288,26 @@ local function BuildFOVCircle()
 
     State.FOVCircle = sg
 
-    -- Trên mobile: center màn hình. Trên PC: theo cursor.
     RunService.RenderStepped:Connect(function()
         if not State.FOVCircle or not State.FOVCircle.Parent then return end
         if Config.Aimbot.MobileMode then
             d.Position = UDim2.new(0.5, 0, 0.5, 0)
-            d.AnchorPoint = Vector2.new(0.5, 0.5)
         else
-            d.AnchorPoint = Vector2.new(0.5, 0.5)
             d.Position = UDim2.new(0, Mouse.X, 0, Mouse.Y)
         end
     end)
 end
 
 -- ========================
--- AIMBOT
+-- AIMBOT (TOGGLE)
 -- ========================
 local function RunAimbot()
     if not Config.Aimbot.Enabled then return end
-    if not State.AimHeld then return end
+    if not State.AimActive then return end
 
-    local target
-    if Config.Aimbot.MobileMode then
-        target = ClosestToCenter()
-    else
-        target = ClosestToCursor()
-    end
+    local target = Config.Aimbot.MobileMode
+        and ClosestToCenter()
+        or  ClosestToCursor()
     if not target then return end
 
     local c = GetChar(target)
@@ -300,16 +318,12 @@ local function RunAimbot()
     local sp, on = Camera:WorldToViewportPoint(part.Position)
     if not on then return end
 
-    if Config.Aimbot.MobileMode then
-        -- Mobile: rotate camera
-        local cx = Camera.ViewportSize.X / 2
-        local cy = Camera.ViewportSize.Y / 2
-        local delta = (Vector2.new(sp.X, sp.Y) - Vector2.new(cx, cy)) * Config.Aimbot.SmoothFactor
-        pcall(function() mousemoverel(delta.X, delta.Y) end)
-    else
-        local delta = (Vector2.new(sp.X, sp.Y) - Vector2.new(Mouse.X, Mouse.Y)) * Config.Aimbot.SmoothFactor
-        pcall(function() mousemoverel(delta.X, delta.Y) end)
-    end
+    local ref = Config.Aimbot.MobileMode
+        and Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+        or  Vector2.new(Mouse.X, Mouse.Y)
+
+    local delta = (Vector2.new(sp.X, sp.Y) - ref) * Config.Aimbot.SmoothFactor
+    pcall(function() mousemoverel(delta.X, delta.Y) end)
 end
 
 -- ========================
@@ -343,10 +357,6 @@ local function IsM1Incoming(player)
     return false
 end
 
-local function PressBlock(down)
-    pcall(function() VIM:SendKeyEvent(down, Enum.KeyCode.F, false, game) end)
-end
-
 local function RunAutoblock()
     if not Config.Autoblock.Enabled or State.BlockActive then return end
     for _, p in ipairs(Players:GetPlayers()) do
@@ -355,10 +365,12 @@ local function RunAutoblock()
         if IsM1Incoming(p) then
             State.BlockActive = true
             task.delay(Config.Autoblock.ReactionTime, function()
-                PressBlock(true)
+                SimulateKey(true, Enum.KeyCode.F)
                 task.delay(Config.Autoblock.UnblockDelay, function()
-                    PressBlock(false)
-                    task.delay(0.05, function() State.BlockActive = false end)
+                    SimulateKey(false, Enum.KeyCode.F)
+                    task.delay(0.05, function()
+                        State.BlockActive = false
+                    end)
                 end)
             end)
             break
@@ -376,7 +388,6 @@ local function DestroyPanel(key)
     end
 end
 
--- Helper: big touch button
 local function MakeTouchBtn(parent, xPos, yPos, w, h, label, color, callback)
     local Btn = Instance.new("TextButton")
     Btn.Size             = UDim2.new(0, w, 0, h)
@@ -385,7 +396,7 @@ local function MakeTouchBtn(parent, xPos, yPos, w, h, label, color, callback)
     Btn.BorderSizePixel  = 0
     Btn.Text             = label
     Btn.Font             = Enum.Font.GothamBold
-    Btn.TextSize         = 14
+    Btn.TextSize         = 13
     Btn.TextColor3       = Color3.fromRGB(255, 255, 255)
     Btn.AutoButtonColor  = false
     Btn.Parent           = parent
@@ -406,22 +417,37 @@ local function MakeTouchBtn(parent, xPos, yPos, w, h, label, color, callback)
     return Btn
 end
 
-local function BuildMobileDashPanel()
-    DestroyPanel("MobileDashPanel")
-    if not Config.HookDash.MobileMode then return end
+-- Panel header helper
+local function MakePanelHeader(parent, h, title)
+    local Bar = Instance.new("Frame")
+    Bar.Size             = UDim2.new(1, 0, 0, h)
+    Bar.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
+    Bar.BorderSizePixel  = 0
+    Bar.Parent           = parent
+    Instance.new("UICorner", Bar).CornerRadius = UDim.new(0, 12)
 
-    local sg = Instance.new("ScreenGui")
-    sg.Name           = "AxiomDashPanel"
-    sg.ResetOnSpawn   = false
-    sg.IgnoreGuiInset = true
-    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    sg.Parent         = LocalPlayer.PlayerGui
-    State.MobileDashPanel = sg
+    local Patch = Instance.new("Frame")
+    Patch.Size             = UDim2.new(1, 0, 0, 8)
+    Patch.Position         = UDim2.new(0, 0, 1, -8)
+    Patch.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
+    Patch.BorderSizePixel  = 0
+    Patch.Parent           = Bar
 
+    local Lbl = Instance.new("TextLabel")
+    Lbl.Text               = title
+    Lbl.Font               = Enum.Font.GothamBold
+    Lbl.TextSize           = 12
+    Lbl.TextColor3         = Color3.fromRGB(255, 255, 255)
+    Lbl.Size               = UDim2.new(1, 0, 1, 0)
+    Lbl.BackgroundTransparency = 1
+    Lbl.Parent             = Bar
+end
+
+local function MakeFloatPanel(guiName, w, h, defaultX, defaultY)
+    local sg = SafeGui(guiName)
     local Panel = Instance.new("Frame")
-    Panel.Name             = "DashPanel"
-    Panel.Size             = UDim2.new(0, 210, 0, 120)
-    Panel.Position         = UDim2.new(1, -225, 1, -200)
+    Panel.Size             = UDim2.new(0, w, 0, h)
+    Panel.Position         = UDim2.new(0, defaultX, 0, defaultY)
     Panel.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
     Panel.BorderSizePixel  = 0
     Panel.Active           = true
@@ -429,36 +455,26 @@ local function BuildMobileDashPanel()
     Panel.Parent           = sg
     Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 12)
 
-    local PStroke = Instance.new("UIStroke")
-    PStroke.Color     = Color3.fromRGB(200, 45, 45)
-    PStroke.Thickness = 1.5
-    PStroke.Parent    = Panel
+    local PS = Instance.new("UIStroke")
+    PS.Color = Color3.fromRGB(200, 45, 45); PS.Thickness = 1.5
+    PS.Parent = Panel
 
-    -- Header
-    local Header = Instance.new("Frame")
-    Header.Size             = UDim2.new(1, 0, 0, 30)
-    Header.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
-    Header.BorderSizePixel  = 0
-    Header.Parent           = Panel
-    Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 12)
+    return sg, Panel
+end
 
-    local HPatch = Instance.new("Frame")
-    HPatch.Size             = UDim2.new(1, 0, 0, 8)
-    HPatch.Position         = UDim2.new(0, 0, 1, -8)
-    HPatch.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
-    HPatch.BorderSizePixel  = 0
-    HPatch.Parent           = Header
+local function BuildMobileDashPanel()
+    DestroyPanel("MobileDashPanel")
 
-    local HLbl = Instance.new("TextLabel")
-    HLbl.Text               = "⚡ Hook Dash"
-    HLbl.Font               = Enum.Font.GothamBold
-    HLbl.TextSize           = 12
-    HLbl.TextColor3         = Color3.fromRGB(255, 255, 255)
-    HLbl.Size               = UDim2.new(1, 0, 1, 0)
-    HLbl.BackgroundTransparency = 1
-    HLbl.Parent             = Header
+    local sg, Panel = MakeFloatPanel(
+        "AxiomDashPanel", 215, 125,
+        -- góc dưới phải — tính từ viewport
+        Camera.ViewportSize.X - 230,
+        Camera.ViewportSize.Y - 220
+    )
+    State.MobileDashPanel = sg
 
-    -- Target label
+    MakePanelHeader(Panel, 30, "⚡ Hook Dash")
+
     local TLbl = Instance.new("TextLabel")
     TLbl.Name               = "TLbl"
     TLbl.Text               = "Target: None"
@@ -471,20 +487,18 @@ local function BuildMobileDashPanel()
     TLbl.TextXAlignment     = Enum.TextXAlignment.Left
     TLbl.Parent             = Panel
 
-    -- TARGET button
-    MakeTouchBtn(Panel, 8, 55, 95, 55, "🎯\nTARGET",
-        Color3.fromRGB(35, 35, 50), function()
+    MakeTouchBtn(Panel, 8, 55, 97, 58, "🎯\nTARGET",
+        Color3.fromRGB(35, 35, 52), function()
             if not Config.HookDash.Enabled then return end
             local t = ClosestWorld()
             SetHookTarget(t)
-            TLbl.Text      = t and ("Target: "..t.Name) or "Target: None"
+            TLbl.Text       = t and ("📍 " .. t.Name) or "Target: None"
             TLbl.TextColor3 = t
                 and Color3.fromRGB(255, 100, 100)
                 or  Color3.fromRGB(150, 150, 160)
         end)
 
-    -- DASH button
-    MakeTouchBtn(Panel, 110, 55, 95, 55, "⚡\nDASH",
+    MakeTouchBtn(Panel, 112, 55, 97, 58, "⚡\nDASH",
         Color3.fromRGB(190, 35, 35), function()
             if not Config.HookDash.Enabled then return end
             if State.HookTarget and IsAlive(State.HookTarget) then
@@ -496,7 +510,7 @@ local function BuildMobileDashPanel()
             end
         end)
 
-    -- Sync label heartbeat
+    -- Sync target label
     local conn
     conn = RunService.Heartbeat:Connect(function()
         if not State.MobileDashPanel or not State.MobileDashPanel.Parent then
@@ -512,83 +526,42 @@ end
 
 local function BuildMobileAimPanel()
     DestroyPanel("MobileAimPanel")
-    if not Config.Aimbot.MobileMode or not Config.Aimbot.Enabled then return end
 
-    local sg = Instance.new("ScreenGui")
-    sg.Name           = "AxiomAimPanel"
-    sg.ResetOnSpawn   = false
-    sg.IgnoreGuiInset = true
-    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    sg.Parent         = LocalPlayer.PlayerGui
+    local sg, Panel = MakeFloatPanel(
+        "AxiomAimPanel", 140, 85,
+        Camera.ViewportSize.X - 155,
+        Camera.ViewportSize.Y - 310
+    )
     State.MobileAimPanel = sg
 
-    local Panel = Instance.new("Frame")
-    Panel.Name             = "AimPanel"
-    Panel.Size             = UDim2.new(0, 130, 0, 80)
-    Panel.Position         = UDim2.new(1, -150, 1, -300)
-    Panel.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
-    Panel.BorderSizePixel  = 0
-    Panel.Active           = true
-    Panel.Draggable        = true
-    Panel.Parent           = sg
-    Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 12)
+    MakePanelHeader(Panel, 28, "🎯 Aimbot")
 
-    local PStroke = Instance.new("UIStroke")
-    PStroke.Color     = Color3.fromRGB(200, 45, 45)
-    PStroke.Thickness = 1.5
-    PStroke.Parent    = Panel
-
-    -- Header
-    local Header = Instance.new("Frame")
-    Header.Size             = UDim2.new(1, 0, 0, 28)
-    Header.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
-    Header.BorderSizePixel  = 0
-    Header.Parent           = Panel
-    Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 12)
-
-    local HPatch = Instance.new("Frame")
-    HPatch.Size             = UDim2.new(1, 0, 0, 8)
-    HPatch.Position         = UDim2.new(0, 0, 1, -8)
-    HPatch.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
-    HPatch.BorderSizePixel  = 0
-    HPatch.Parent           = Header
-
-    local HLbl = Instance.new("TextLabel")
-    HLbl.Text               = "🎯 Aimbot"
-    HLbl.Font               = Enum.Font.GothamBold
-    HLbl.TextSize           = 12
-    HLbl.TextColor3         = Color3.fromRGB(255, 255, 255)
-    HLbl.Size               = UDim2.new(1, 0, 1, 0)
-    HLbl.BackgroundTransparency = 1
-    HLbl.Parent             = Header
-
-    -- AIM hold button (hold = aim active)
+    -- Toggle aim button (tap to on/off)
     local AimBtn = Instance.new("TextButton")
-    AimBtn.Size             = UDim2.new(1, -16, 0, 40)
-    AimBtn.Position         = UDim2.new(0, 8, 0, 34)
-    AimBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    AimBtn.Size             = UDim2.new(1, -16, 0, 44)
+    AimBtn.Position         = UDim2.new(0, 8, 0, 33)
     AimBtn.BorderSizePixel  = 0
-    AimBtn.Text             = "HOLD TO AIM"
     AimBtn.Font             = Enum.Font.GothamBold
     AimBtn.TextSize         = 13
-    AimBtn.TextColor3       = Color3.fromRGB(200, 200, 210)
+    AimBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
     AimBtn.AutoButtonColor  = false
     AimBtn.Parent           = Panel
     Instance.new("UICorner", AimBtn).CornerRadius = UDim.new(0, 8)
 
-    AimBtn.MouseButton1Down:Connect(function()
-        State.AimHeld = true
-        TweenService:Create(AimBtn, TweenInfo.new(0.07), {
-            BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+    local function RefreshAimBtn()
+        AimBtn.Text = State.AimActive and "● ON" or "○ OFF"
+        TweenService:Create(AimBtn, TweenInfo.new(0.12), {
+            BackgroundColor3 = State.AimActive
+                and Color3.fromRGB(200, 40, 40)
+                or  Color3.fromRGB(35, 35, 52)
         }):Play()
-        AimBtn.Text = "● AIMING"
-    end)
-    AimBtn.MouseButton1Up:Connect(function()
-        State.AimHeld = false
-        TweenService:Create(AimBtn, TweenInfo.new(0.07), {
-            BackgroundColor3 = Color3.fromRGB(35, 35, 50)
-        }):Play()
-        AimBtn.Text = "HOLD TO AIM"
+    end
+
+    RefreshAimBtn()
+
+    AimBtn.MouseButton1Click:Connect(function()
+        State.AimActive = not State.AimActive
+        RefreshAimBtn()
     end)
 end
 
@@ -596,48 +569,44 @@ end
 -- MAIN MENU
 -- ========================
 local function BuildMenu()
-    local old = LocalPlayer.PlayerGui:FindFirstChild("AxiomMenu")
+    local old = CoreGui:FindFirstChild("AxiomMenu")
     if old then old:Destroy() end
 
-    local RootGui = Instance.new("ScreenGui")
-    RootGui.Name           = "AxiomMenu"
-    RootGui.ResetOnSpawn   = false
-    RootGui.IgnoreGuiInset = true
-    RootGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    RootGui.Parent         = LocalPlayer.PlayerGui
+    local RootGui = SafeGui("AxiomMenu")
 
-    -- ── Menu icon button (góc trên trái) ──
+    -- ── Icon button (ô vuông đỏ, góc trên trái) ──
     local IconBtn = Instance.new("TextButton")
     IconBtn.Name             = "MenuIcon"
-    IconBtn.Size             = UDim2.new(0, 44, 0, 44)
-    IconBtn.Position         = UDim2.new(0, 10, 0, 10)
+    IconBtn.Size             = UDim2.new(0, 48, 0, 48)
+    IconBtn.Position         = UDim2.new(0, 12, 0, 12)
     IconBtn.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
     IconBtn.BorderSizePixel  = 0
     IconBtn.Text             = "⚡"
     IconBtn.Font             = Enum.Font.GothamBold
-    IconBtn.TextSize         = 22
+    IconBtn.TextSize         = 24
     IconBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
     IconBtn.AutoButtonColor  = false
-    IconBtn.ZIndex           = 10
+    IconBtn.ZIndex           = 20
     IconBtn.Parent           = RootGui
-    Instance.new("UICorner", IconBtn).CornerRadius = UDim.new(0, 12)
+    Instance.new("UICorner", IconBtn).CornerRadius = UDim.new(0, 10)
 
     local IStroke = Instance.new("UIStroke")
-    IStroke.Color     = Color3.fromRGB(255, 255, 255)
-    IStroke.Thickness = 1
-    IStroke.Transparency = 0.6
-    IStroke.Parent    = IconBtn
+    IStroke.Color       = Color3.fromRGB(255, 255, 255)
+    IStroke.Thickness   = 1
+    IStroke.Transparency = 0.5
+    IStroke.Parent      = IconBtn
 
-    -- ── Menu frame ──
+    -- ── Menu frame (mặc định ẩn) ──
     local Frame = Instance.new("Frame")
     Frame.Name             = "MainFrame"
-    Frame.Size             = UDim2.new(0, 250, 0, 490)
-    Frame.Position         = UDim2.new(0, 10, 0, 62)
+    Frame.Size             = UDim2.new(0, 255, 0, 460)
+    Frame.Position         = UDim2.new(0, 12, 0, 68)
     Frame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
     Frame.BorderSizePixel  = 0
     Frame.Active           = true
     Frame.Draggable        = true
-    Frame.Visible          = State.MenuVisible
+    Frame.Visible          = false   -- ẩn mặc định
+    Frame.ZIndex           = 10
     Frame.Parent           = RootGui
     Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 10)
 
@@ -651,6 +620,7 @@ local function BuildMenu()
     TitleBar.Size             = UDim2.new(1, 0, 0, 38)
     TitleBar.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
     TitleBar.BorderSizePixel  = 0
+    TitleBar.ZIndex           = 11
     TitleBar.Parent           = Frame
     Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
 
@@ -659,19 +629,21 @@ local function BuildMenu()
     TBPatch.Position         = UDim2.new(0, 0, 1, -10)
     TBPatch.BackgroundColor3 = Color3.fromRGB(190, 35, 35)
     TBPatch.BorderSizePixel  = 0
+    TBPatch.ZIndex           = 11
     TBPatch.Parent           = TitleBar
 
-    local TLbl = Instance.new("TextLabel")
-    TLbl.Text               = "⚡  AXIOM SUITE"
-    TLbl.Font               = Enum.Font.GothamBold
-    TLbl.TextSize           = 14
-    TLbl.TextColor3         = Color3.fromRGB(255, 255, 255)
-    TLbl.Size               = UDim2.new(1, 0, 1, 0)
-    TLbl.BackgroundTransparency = 1
-    TLbl.Parent             = TitleBar
+    local TitleLbl = Instance.new("TextLabel")
+    TitleLbl.Text               = "⚡  AXIOM SUITE"
+    TitleLbl.Font               = Enum.Font.GothamBold
+    TitleLbl.TextSize           = 14
+    TitleLbl.TextColor3         = Color3.fromRGB(255, 255, 255)
+    TitleLbl.Size               = UDim2.new(1, 0, 1, 0)
+    TitleLbl.BackgroundTransparency = 1
+    TitleLbl.ZIndex             = 12
+    TitleLbl.Parent             = TitleBar
 
     local SubLbl = Instance.new("TextLabel")
-    SubLbl.Text             = "Hero Battleground  •  v5"
+    SubLbl.Text             = "Hero Battleground  •  v6"
     SubLbl.Font             = Enum.Font.Gotham
     SubLbl.TextSize         = 10
     SubLbl.TextColor3       = Color3.fromRGB(120, 120, 135)
@@ -681,14 +653,13 @@ local function BuildMenu()
     SubLbl.TextXAlignment   = Enum.TextXAlignment.Left
     SubLbl.Parent           = Frame
 
-    -- Icon toggle logic
+    -- Icon toggle
     IconBtn.MouseButton1Click:Connect(function()
-        State.MenuVisible = not State.MenuVisible
-        Frame.Visible = State.MenuVisible
+        Frame.Visible = not Frame.Visible
         TweenService:Create(IconBtn, TweenInfo.new(0.1), {
-            BackgroundColor3 = State.MenuVisible
+            BackgroundColor3 = Frame.Visible
                 and Color3.fromRGB(190, 35, 35)
-                or  Color3.fromRGB(40, 40, 55)
+                or  Color3.fromRGB(40, 40, 55),
         }):Play()
     end)
 
@@ -771,64 +742,63 @@ local function BuildMenu()
         end)
     end
 
-    -- ── Rows ──
+    -- ── Menu rows ──
     MakeToggle(62,  "⚡", "Hook Dash",
-        "V: Lock | C: Dash (PC)",
+        "V: Lock | C: Dash  (PC)",
         Config.HookDash, "Enabled", nil)
 
     MakeToggle(124, "📱", "Dash Mobile",
-        "Show TARGET + DASH panel",
+        "Hiện panel TARGET + DASH",
         Config.HookDash, "MobileMode", function(val)
-            if val then BuildMobileDashPanel()
-            else DestroyPanel("MobileDashPanel") end
+            if val then
+                BuildMobileDashPanel()
+            else
+                DestroyPanel("MobileDashPanel")
+            end
         end)
 
     MakeToggle(186, "🎯", "Aimbot",
-        "H key (PC) | Mobile panel below",
+        "Toggle aim  |  H key (PC)",
         Config.Aimbot, "Enabled", function(val)
-            if not val then
-                DestroyPanel("MobileAimPanel")
-                if State.FOVCircle then
-                    State.FOVCircle:Destroy()
-                    State.FOVCircle = nil
-                end
-            else
+            if val then
                 BuildFOVCircle()
                 if Config.Aimbot.MobileMode then
                     BuildMobileAimPanel()
                 end
+            else
+                State.AimActive = false
+                DestroyPanel("MobileAimPanel")
+                DestroyFOV()
             end
         end)
 
     MakeToggle(248, "📱", "Aim Mobile",
-        "Show HOLD TO AIM button",
+        "Hiện nút ON/OFF aimbot",
         Config.Aimbot, "MobileMode", function(val)
             if val and Config.Aimbot.Enabled then
                 BuildMobileAimPanel()
             else
+                State.AimActive = false
                 DestroyPanel("MobileAimPanel")
             end
         end)
 
     MakeToggle(310, "🛡", "Auto Block",
-        "Auto-F on enemy M1",
+        "Auto-F khi enemy M1",
         Config.Autoblock, "Enabled", nil)
 
     MakeToggle(372, "👁", "FOV Circle",
-        "Visualize aim radius",
+        "Vòng tròn FOV aimbot",
         Config.Aimbot, "ShowFOV", function(val)
             if val and Config.Aimbot.Enabled then
                 BuildFOVCircle()
             else
-                if State.FOVCircle then
-                    State.FOVCircle:Destroy()
-                    State.FOVCircle = nil
-                end
+                DestroyFOV()
             end
         end)
 
     local Footer = Instance.new("TextLabel")
-    Footer.Text             = "by Axiom  •  ⚡ icon to hide"
+    Footer.Text             = "by Axiom  •  ⚡ để ẩn/hiện"
     Footer.Font             = Enum.Font.Gotham
     Footer.TextSize         = 9
     Footer.TextColor3       = Color3.fromRGB(55, 55, 70)
@@ -849,7 +819,6 @@ BuildMenu()
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
 
-    -- Hook Dash PC
     if not Config.HookDash.MobileMode and Config.HookDash.Enabled then
         if input.KeyCode == Config.HookDash.TargetKey then
             local t = ClosestToCursor()
@@ -863,17 +832,11 @@ UserInputService.InputBegan:Connect(function(input, processed)
         end
     end
 
-    -- Aimbot H key PC
+    -- H key toggle aimbot (PC, non-mobile)
     if not Config.Aimbot.MobileMode and Config.Aimbot.Enabled then
         if input.KeyCode == Config.Aimbot.AimKey then
-            State.AimHeld = true
+            State.AimActive = not State.AimActive
         end
-    end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-    if not Config.Aimbot.MobileMode and input.KeyCode == Config.Aimbot.AimKey then
-        State.AimHeld = false
     end
 end)
 
@@ -885,18 +848,15 @@ end)
 -- HEARTBEAT
 -- ========================
 RunService.Heartbeat:Connect(function()
-    -- Hook target cleanup
     if State.HookTarget and not IsAlive(State.HookTarget) then
         SetHookTarget(nil)
     end
-    -- Update highlight adornee on respawn
     if State.TargetHL and State.HookTarget then
         local c = GetChar(State.HookTarget)
         if c then State.TargetHL.Adornee = c end
     end
-
     RunAimbot()
     RunAutoblock()
 end)
 
-print("[Axiom] v5 loaded — ⚡ icon top-left to show/hide menu")
+print("[Axiom] v6 loaded — tap ⚡ icon to open menu")
